@@ -1,9 +1,6 @@
 
 // Use Parse.Cloud.define to define as many cloud functions as you want.
 // For example:
-Parse.Cloud.define("hello", function(request, response) {
-  response.success("Hello world!");
-});
 
 /* nexmo --------------------------- */
 var nexmoAPI = require('cloud/lib/nexmoKey');
@@ -53,4 +50,15 @@ Parse.Cloud.define("verifyCheck", function (request, response) {
       response.error(httpResponse.data);
     }
   });
+});
+
+Parse.Cloud.beforeDelete('Products', function (request, response) {
+  console.log(request);
+  response.error();
+  //Prase.Cloud.httpRequest({
+    //url: 'https://api.parse.com/1/files/' + request.video.name,
+    //method: 'DELETE',
+    //headers: {
+    //},
+  //})
 });
