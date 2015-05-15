@@ -52,6 +52,26 @@ Parse.Cloud.define("verifyCheck", function (request, response) {
   });
 });
 
+Parse.Cloud.define('findFriendByPhones', function (request, response) {
+  var promiseReqs = request.params.phones.map(function (phone) {
+    var query = new Parse.Query(Parse.User);
+    query.equalTo('mobile', phone);
+    return query.first();
+  });
+
+  var promise = new Parse.Promise();
+  Parse.Promise.when(promiseReqs).then(function () {
+    var users = [].slice.call(arguments);
+    users = users.filter(function (user) {
+      return user && user.id !== request.user.id;
+    });
+    request.user.relation('friendsRelation').add(users);
+    request.user.save().then(function () {
+      response.success('ok');
+    });
+  });
+});
+
 Parse.Cloud.beforeDelete('Products', function (request, response) {
   console.log(request);
   response.error();
@@ -61,4 +81,12 @@ Parse.Cloud.beforeDelete('Products', function (request, response) {
     //headers: {
     //},
   //})
+});
+
+Parse.Cloud.afterDelete('Products', function (request) {
+  var productId = request.object.id;
+  var activitesQuery = new Parse.Query('Activites');
+  activitesQuery.equalTo('activityObject', request.object).find(function (activites) {
+    Parse.Object.destroyAll(activites);
+  });
 });
