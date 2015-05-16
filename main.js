@@ -72,21 +72,62 @@ Parse.Cloud.define('findFriendByPhones', function (request, response) {
   });
 });
 
-Parse.Cloud.beforeDelete('Products', function (request, response) {
-  console.log(request);
-  response.error();
-  //Prase.Cloud.httpRequest({
-    //url: 'https://api.parse.com/1/files/' + request.video.name,
-    //method: 'DELETE',
-    //headers: {
-    //},
-  //})
-});
-
 Parse.Cloud.afterDelete('Products', function (request) {
   var productId = request.object.id;
   var activitesQuery = new Parse.Query('Activites');
   activitesQuery.equalTo('activityObject', request.object).find(function (activites) {
     Parse.Object.destroyAll(activites);
   });
+  var messagesQuery = new Parse.Query('Messages');
+  messagesQuery.equalTo('product', request.object).find(function (messages){
+    Parse.Object.destroyAll(messages);
+  });
+  var commentsQuery = new Parse.Query('Comments');
+  commentsQuery.equalTo('product', request.object).find(function (comments) {
+    Parse.Object.destroyAll(comments);
+  });
+  var likesQuery = new Parse.Query('Likes');
+  likesQuery.equalTo('likedProduct', request.object).find(function (likes) {
+    Parse.Object.destroyAll(likes);
+  });
+
+  var images = request.object.get('images');
+  var deleteImagesReqs = images.map(function (image) {
+    return Parse.Cloud.httpRequest({
+      method: 'DELETE',
+      url: image.url(),
+      headers: {
+        "X-Parse-Application-Id": "DHPbawPXsk9VM697XtD0UNuYAuaxuxc8tEXoIquY",
+        "X-Parse-Master-Key": "gHSj9XICI4DxlHD89WCzWn1ki77foPucPBAqil6p"
+      }
+    });
+  });
+  Parse.Promise.when(images);
+  var video = request.object.get('video');
+  Parse.Cloud.httpRequest({
+    method: 'DELETE',
+    url: video.url(),
+    headers: {
+      "X-Parse-Application-Id": "DHPbawPXsk9VM697XtD0UNuYAuaxuxc8tEXoIquY",
+      "X-Parse-Master-Key": "gHSj9XICI4DxlHD89WCzWn1ki77foPucPBAqil6p"
+    }
+  });
+  var thumbnailImages = request.object.get('thumbnailImages');
+  var deleteThumbnailImagesReqs = thumbnailImages.map(function (thumbnailImage) {
+    return Parse.Cloud.httpRequest({
+      method: 'DELETE',
+      url: thumbnailImage.url(),
+      headers: {
+        "X-Parse-Application-Id": "DHPbawPXsk9VM697XtD0UNuYAuaxuxc8tEXoIquY",
+        "X-Parse-Master-Key": "gHSj9XICI4DxlHD89WCzWn1ki77foPucPBAqil6p"
+      }
+    });
+  });
+  deleteThumbnailImagesReqs.shift();
+  Parse.Promise.when(deleteThumbnailImagesReqs);
+});
+
+Parse.Cloud.afterDelete('Messages', function (request) {
+  var chatsQuery = new Parse.Query('Chats');
+  chatsQuery.equalTo('chatRoomId', request.object.chatRoomId);
 });
