@@ -1,9 +1,6 @@
 
 // Use Parse.Cloud.define to define as many cloud functions as you want.
 // For example:
-Parse.Cloud.define("hello", function(request, response) {
-  response.success("Hello world!");
-});
 
 /* nexmo --------------------------- */
 var nexmoAPI = require('cloud/lib/nexmoKey');
@@ -53,4 +50,84 @@ Parse.Cloud.define("verifyCheck", function (request, response) {
       response.error(httpResponse.data);
     }
   });
+});
+
+Parse.Cloud.define('findFriendByPhones', function (request, response) {
+  var promiseReqs = request.params.phones.map(function (phone) {
+    var query = new Parse.Query(Parse.User);
+    query.equalTo('mobile', phone);
+    return query.first();
+  });
+
+  var promise = new Parse.Promise();
+  Parse.Promise.when(promiseReqs).then(function () {
+    var users = [].slice.call(arguments);
+    users = users.filter(function (user) {
+      return user && user.id !== request.user.id;
+    });
+    request.user.relation('friendsRelation').add(users);
+    request.user.save().then(function () {
+      response.success('ok');
+    });
+  });
+});
+
+Parse.Cloud.afterDelete('Products', function (request) {
+  var productId = request.object.id;
+  var activitesQuery = new Parse.Query('Activites');
+  activitesQuery.equalTo('activityObject', request.object).find(function (activites) {
+    Parse.Object.destroyAll(activites);
+  });
+  var messagesQuery = new Parse.Query('Messages');
+  messagesQuery.equalTo('product', request.object).find(function (messages){
+    Parse.Object.destroyAll(messages);
+  });
+  var commentsQuery = new Parse.Query('Comments');
+  commentsQuery.equalTo('product', request.object).find(function (comments) {
+    Parse.Object.destroyAll(comments);
+  });
+  var likesQuery = new Parse.Query('Likes');
+  likesQuery.equalTo('likedProduct', request.object).find(function (likes) {
+    Parse.Object.destroyAll(likes);
+  });
+
+  var images = request.object.get('images');
+  var deleteImagesReqs = images.map(function (image) {
+    return Parse.Cloud.httpRequest({
+      method: 'DELETE',
+      url: image.url(),
+      headers: {
+        "X-Parse-Application-Id": "DHPbawPXsk9VM697XtD0UNuYAuaxuxc8tEXoIquY",
+        "X-Parse-Master-Key": "gHSj9XICI4DxlHD89WCzWn1ki77foPucPBAqil6p"
+      }
+    });
+  });
+  Parse.Promise.when(images);
+  var video = request.object.get('video');
+  Parse.Cloud.httpRequest({
+    method: 'DELETE',
+    url: video.url(),
+    headers: {
+      "X-Parse-Application-Id": "DHPbawPXsk9VM697XtD0UNuYAuaxuxc8tEXoIquY",
+      "X-Parse-Master-Key": "gHSj9XICI4DxlHD89WCzWn1ki77foPucPBAqil6p"
+    }
+  });
+  var thumbnailImages = request.object.get('thumbnailImages');
+  var deleteThumbnailImagesReqs = thumbnailImages.map(function (thumbnailImage) {
+    return Parse.Cloud.httpRequest({
+      method: 'DELETE',
+      url: thumbnailImage.url(),
+      headers: {
+        "X-Parse-Application-Id": "DHPbawPXsk9VM697XtD0UNuYAuaxuxc8tEXoIquY",
+        "X-Parse-Master-Key": "gHSj9XICI4DxlHD89WCzWn1ki77foPucPBAqil6p"
+      }
+    });
+  });
+  deleteThumbnailImagesReqs.shift();
+  Parse.Promise.when(deleteThumbnailImagesReqs);
+});
+
+Parse.Cloud.afterDelete('Messages', function (request) {
+  var chatsQuery = new Parse.Query('Chats');
+  chatsQuery.equalTo('chatRoomId', request.object.chatRoomId);
 });
