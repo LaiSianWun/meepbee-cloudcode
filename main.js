@@ -6,6 +6,19 @@
 var nexmoAPI = require('cloud/lib/nexmoKey');
 var categoryConstants = require('cloud/lib/categoryConstants');
 var Image = require("parse-image");
+var _ = require('underscore');
+var Buffer = require('buffer').Buffer;
+
+/**
+ *   Create a Parse ACL which prohibits public access.  This will be used
+ *   in several places throughout the application, to explicitly protect
+ *   Parse User, TokenRequest, and TokenStorage objects.
+ */
+var restrictedAcl = new Parse.ACL();
+restrictedAcl.setPublicReadAccess(false);
+restrictedAcl.setPublicWriteAccess(false);
+
+var TokenStorage = Parse.Object.extend("TokenStorage");
 
 Parse.Cloud.define("verifyRequest", function (request, response) {
   Parse.Cloud.httpRequest({
@@ -57,20 +70,25 @@ Parse.Cloud.define("verifyCheck", function (request, response) {
 Parse.Cloud.beforeSave("_User", function(request, response) {
   console.log('beforeSave User');
   var user = request.object;
-  console.log('user: ', user);
-  if (!user.dirty("avatarImage")) {
+  if (!user.dirty("avatarImage") && !user.dirty("thirdPartyProfileImage")) {
     // The profile photo isn't being modified.
     console.log('no modified');
     response.success();
   } else {
     console.log('modified');
+    var profileImageUrl = ''
+    if (user.dirty("thirdPartyProfileImage")) {
+      console.log('thirdPartyProfileImage is dirty');
+      profileImageUrl = user.get("thirdPartyProfileImage");
+    } else {
+      console.log('avatarImage is dirty');
+      profileImageUrl = user.get("avatarImage").url();
+    }
     Parse.Cloud.httpRequest({
-      url: user.get("avatarImage").url()
-
+      url: profileImageUrl
     }).then(function(response) {
       var image = new Image();
       return image.setData(response.buffer);
-
     }).then(function(image) {
       // Crop the image to the smaller of width or height.
       var size = Math.min(image.width(), image.height());
@@ -80,32 +98,26 @@ Parse.Cloud.beforeSave("_User", function(request, response) {
         width: size,
         height: size
       });
-
     }).then(function(image) {
       // Resize the image to 64x64.
       return image.scale({
         width: 200,
         height: 200
       });
-
     }).then(function(image) {
       // Make sure it's a JPEG to save disk space and bandwidth.
       return image.setFormat("PNG");
-
     }).then(function(image) {
       // Get the image data in a Buffer.
       return image.data();
-
     }).then(function(buffer) {
       // Save the image into a new file.
       var base64 = buffer.toString("base64");
       var cropped = new Parse.File("thumbnail.png", { base64: base64 });
       return cropped.save();
-
     }).then(function(cropped) {
       // Attach the image file to the original object.
       user.set("avatarImage", cropped);
-
     }).then(function(result) {
       response.success();
     }, function(error) {
@@ -271,7 +283,8 @@ Parse.Cloud.define('productWithRelated', function (request, response) {
     .limit(limit)
     .skip(skip)
     .include('seller')
-    .descending('createdAt');
+    .descending('createdAt')
+    .notEqualTo('inproper', true);
   if (typeof selectedCategory !== "undefined" && selectedCategory !== categoryConstants.ALL_PRODUCT) {
     productsQuery.equalTo('category', selectedCategory);
   }
@@ -378,3 +391,115 @@ Parse.Cloud.define('friendWithRelated', function (request, response) {
     response.success([]);
   }
 });
+
+Parse.Cloud.define('thirdPartyLogin', function (request, response) {
+  console.log('thirdPartyLogin');
+  Parse.Cloud.useMasterKey();
+  var accessToken = request.params.thirdPartyUserData.token;
+  var thirdPartyUserData = request.params.thirdPartyUserData;
+  return upsertGitHubUser(accessToken, thirdPartyUserData).then(function (user) {
+    console.log('is generated');
+    response.success(user.getSessionToken());
+  }, function (error) {
+    console.log(error);
+    response.error(error);
+  });
+});
+
+/**
+ *   This function checks to see if this GitHub user has logged in before.
+ *   If the user is found, update the accessToken (if necessary) and return
+ *   the users session token.  If not found, return the newGitHubUser promise.
+ */
+var upsertGitHubUser = function(accessToken, thirdPartyUserData) {
+  console.log('upsertGitHubUser');
+  var query = new Parse.Query(TokenStorage);
+  query.equalTo('thirdPartyId', thirdPartyUserData.userID);
+  query.ascending('createdAt');
+  var password;
+  // Check if this thirdPartyId has previously logged in, using the master key
+  return query.first({ useMasterKey: true }).then(function(tokenData) {
+    // If not, create a new user.
+    if (!tokenData) {
+      console.log('!tokenData');
+      return newGitHubUser(accessToken, thirdPartyUserData);
+    }
+    // If found, fetch the user.
+    var user = tokenData.get('user');
+    return user.fetch({ useMasterKey: true }).then(function(user) {
+      // Update the accessToken if it is different.
+      if (accessToken !== tokenData.get('accessToken')) {
+        console.log('Update the accessToken if it is different');
+        tokenData.set('accessToken', accessToken);
+      }
+      /**
+       * This save will not use an API request if the token was not changed.
+       * e.g. when a new user is created and upsert is called again.
+       */
+      return tokenData.save(null, { useMasterKey: true });
+    }).then(function(obj) {
+  		password = new Buffer(24);
+  		_.times(24, function(i) {
+  			password.set(i, _.random(0, 255));
+  		});
+  		password = password.toString('base64')
+  		user.setPassword(password);
+      console.log('user.save()');
+      return user.save();
+    }).then(function(user) {
+      console.log('Parse.User.logIn');
+  		return Parse.User.logIn(user.get('username'), password);
+    }).then(function(user) {
+      // Return the user object.
+      console.log('Parse.Promise.as(user)');
+      return Parse.Promise.as(user);
+    });
+  });
+};
+
+/**
+ *  This function creates a Parse User with a random login and password, and
+ *  associates it with an object in the TokenStorage class.
+ *  Once completed, this will return upsertGitHubUser.  This is done to protect
+ *  against a race condition:  In the rare event where 2 new users are created
+ *  at the same time, only the first one will actually get used.
+ */
+var newGitHubUser = function(accessToken, thirdPartyUserData) {
+  console.log('newGitHubUser');
+  var user = new Parse.User();
+  // Generate a random username and password.
+  var username = new Buffer(24);
+  var password = new Buffer(24);
+  _.times(24, function(i) {
+    username.set(i, _.random(0, 255));
+    password.set(i, _.random(0, 255));
+  });
+  user.set("username", username.toString('base64'));
+  user.set("password", password.toString('base64'));
+  user.set('name', thirdPartyUserData.name);
+  user.set('fbEmail', thirdPartyUserData.email);
+  user.set('facebookId', thirdPartyUserData.userID);
+  user.set('thirdPartyLogin', true);
+  user.set('thirdPartyProfileImage', thirdPartyUserData.profileImageUrl);
+  user.set('shippings', [{'fee': 0, 'selected': false, 'shippingWay': '面交'}, {'fee': 0, 'selected': false, 'shippingWay': '郵寄'}, {'fee': 0, 'selected': false, 'shippingWay': '貨到付款'}]);
+  user.set('payments', [{'description': '', 'selected': false, 'tradingWay': '面交'}, {'description': '', 'selected': false, 'tradingWay': 'ATM轉帳'}, {'description': '', 'selected': false, 'tradingWay': '貨到付款'}]);
+  user.set('numberOfProducts', 0);
+  // Sign up the new User
+  return user.signUp().then(function(user) {
+    console.log('user.signUp().then');
+    // create a new TokenStorage object to store the user+GitHub association.
+    var ts = new TokenStorage();
+    ts.set('thirdPartyId', thirdPartyUserData.userID);
+    // ts.set('thirdPartyLogin', thirdPartyUserData.login);
+    ts.set('accessToken', accessToken);
+    ts.set('user', user);
+    ts.setACL(restrictedAcl);
+    // Use the master key because TokenStorage objects should be protected.
+    return ts.save(null, { useMasterKey: true });
+  }, function (error) {
+    console.log('user.signUp().then error');
+    return Parse.Promise.error(error)
+  }).then(function(tokenStorage) {
+    return upsertGitHubUser(accessToken, thirdPartyUserData);
+  });
+};
