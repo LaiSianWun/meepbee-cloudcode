@@ -4,6 +4,7 @@
 
 /* nexmo --------------------------- */
 var nexmoAPI = require('cloud/lib/nexmoKey');
+var pushd = require('cloud/lib/pushd');
 var categoryConstants = require('cloud/lib/categoryConstants');
 var Image = require("parse-image");
 var _ = require('underscore');
@@ -126,8 +127,221 @@ Parse.Cloud.beforeSave("_User", function(request, response) {
   }
 });
 
+Parse.Cloud.afterSave("Chats", function(request, response) {
+  console.log('afterSaves Chats');
+  var sender = request.user;
+  var chat = request.object;
+  var chatRoomId = chat.get('chatRoomId');
+  var text = chat.get('text');
+  var buyerId = chatRoomId.substring(0, 10);
+  var sellerId = chatRoomId.substring(20, 30);
+  if (sender.id !== buyerId) {
+    console.log('should send push to buyer');
+    sendPushToChannel({'title': 'beeding', 'msg': sender.get('name') + '：' + text}, "beeding-"+buyerId)
+  } else {
+    console.log('should send push to seller');
+    sendPushToChannel({'title': 'beeding', 'msg': sender.get('name') + '：' + text}, "beeding-"+sellerId)
+  }
+});
+
+Parse.Cloud.afterSave("Follows", function(request, response) {
+  console.log('afterSave Follows');
+  var sender = request.user;
+  var follow = request.object;
+  var toUser = follow.get('toUser');
+  console.log('toUser: ' + toUser.id);
+  var text = '在beeding上開始追蹤您。'
+  sendPushToChannel({'title': 'beeding', 'msg': sender.get('name') + text}, "beeding-"+toUser.id)
+});
+
+Parse.Cloud.afterSave("Likes", function(request, response) {
+  console.log('afterSaves Likes');
+  var sender = request.user;
+  var like = request.object;
+  var likedProduct = like.get('likedProduct');
+  var productsQuery = new Parse.Query('Products');
+  productsQuery.get(likedProduct.id).then(function (product) {
+    var text = sender.get('name') + "喜歡您的商品" + product.get('title') + "。"
+    sendPushToChannel({'title': 'beeding', 'msg': text}, "beeding-"+product.get('seller').id)
+  });
+});
+
+Parse.Cloud.afterSave("Comments", function(request, response) {
+  console.log('afterSaves Comments');
+  var sender = request.user;
+  var comment = request.object;
+  var commentedProduct = comment.get('product');
+  var productsQuery = new Parse.Query('Products');
+  productsQuery.get(commentedProduct.id).then(function (product) {
+    var sellerId = product.get('seller').id;
+    if (sender.id !== sellerId) {
+      var text = sender.get('name') + "在您的商品" + product.get('title') + "上留言。"
+      sendPushToChannel({'title': 'beeding', 'msg': text}, "beeding-"+sellerId)
+    } else {
+      var text = sender.get('name') + "回覆您在商品\"" + product.get('title') + "\"上的留言。"
+      sendPushToChannel({'title': 'beeding', 'msg': text}, "beeding-comment-"+product.id)
+    }
+  });
+});
+
+var orderStatus = {
+  'ORDER_STATUS_UNREAD': '尚未處理',
+  'ORDER_STATUS_READ': '賣家已讀',
+  'ORDER_STATUS_PROCESS': '處理中',
+  'ORDER_STATUS_MET': '已面交',
+  'ORDER_STATUS_SENT': '已寄送',
+  'ORDER_STATUS_CANCEL': '訂單取消',
+  'ORDER_STATUS_DELETE': '刪除訂單',
+}
+
+Parse.Cloud.afterSave("Orders", function(request, response) {
+  console.log('afterSaves Orders');
+  var sender = request.user;
+  var order = request.object;
+  if (order.get('orderStatus') === 'ORDER_STATUS_UNREAD') {
+    var text = sender.get('name') + "購買你的商品\"" + order.get('orderForm').title + "\"，趕緊處理訂單吧！"
+    sendPushToChannel({'title': 'beeding', 'msg': text}, "beeding-"+order.get('seller').id)
+  } else {
+    var text = "訂單\"" + order.get('orderForm').title + "\"，狀態已改變為\"" + orderStatus[order.get('orderStatus')] + "\"。"
+    console.log('text: ' + text);
+    sendPushToChannel({'title': 'beeding', 'msg': text}, "beeding-"+order.get('buyer').id)
+  }
+});
+
+Parse.Cloud.afterDelete('Orders', function (request) {
+  console.log('afterDelete Orders');
+  var sender = request.user;
+  var order = request.object;
+  var text = "訂單\"" + order.get('orderForm').title + "\"，已被刪除。"
+  console.log('text: ' + text);
+  sendPushToChannel({'title': 'beeding', 'msg': text}, "beeding-"+order.get('buyer').id)
+
+  // Delete ralative classes in case there're some null class pointers.
+  var activitesQuery = new Parse.Query('Activites');
+  activitesQuery.equalTo('orderObject', request.object).find().then(function (activites) {
+    Parse.Object.destroyAll(activites);
+  });
+  var messagesQuery = new Parse.Query('OrderMessages');
+  messagesQuery.equalTo('order', request.object).find().then(function (messages){
+    Parse.Object.destroyAll(messages);
+  });
+});
+
+Parse.Cloud.afterSave("Products", function(request, response) {
+  console.log('afterSaves Products');
+  var sender = request.user;
+  var product = request.object;
+  if (product.updatedAt.getTime() == product.createdAt.getTime()) {
+    // Count how many products a seller has now
+    var productsQuery = new Parse.Query('Products');
+    productsQuery.equalTo('seller', sender).count().then(function (count) {
+      sender.set('numberOfProducts', count);
+      sender.save();
+    })
+    return findReceiverIds(sender).then(function (receiverIds) {
+      var uniqReceiverIds =  _.uniq(receiverIds);
+      uniqReceiverIds.forEach(function (receiverId) {
+        var text =  sender.get('name') + "在beeding上賣了\"" + product.get('title') + "\"，趕緊過來看看！～"
+        sendPushToChannel({'title': 'beeding', 'msg': text}, "beeding-"+receiverId);
+      })
+    }, function (error) {
+      console.log('findReceiverIds error');
+      console.log(error);
+    });
+  }
+});
+
+var findReceiverIds = function (sender) {
+  return sender.relation('friendsRelation').query().find().then(function (friends) {
+    var receiverIds = friends.map(function (friend) {
+      return friend.id;
+    })
+    var followsQuery = new Parse.Query('Follows');
+    return followsQuery.equalTo('toUser', sender).find().then(function (follows) {
+        follows.forEach(function (follow) {
+          var receiverId = follow.get('from').id;
+          receiverIds.push(receiverId);
+        })
+        var friendsFriendQueryPromise = friends.map(function (friend) {
+          var friendRelationQuery = friend.relation('friendsRelation').query();
+          return friendRelationQuery.find();
+        });
+        return Parse.Promise.when(friendsFriendQueryPromise).then(function () {
+          var friendsFriendsList = [].slice.call(arguments);
+          friendsFriendsList.forEach(function (friendsFriends) {
+            friendsFriends.forEach(function (friendsFriend) {
+              receiverIds.push(friendsFriend.id);
+            })
+          })
+          return Parse.Promise.as(receiverIds);
+        }, function (error) {
+          return Parse.Promise.error(error)
+        })
+      }, function (error) {
+        return Parse.Promise.error(error)
+      });
+  });
+};
+
+Parse.Cloud.afterSave("InproperPrudct" , function (request, response) {
+  console.log('afterSaves InproperPrudct');
+  var sender = request.user;
+  var inproperPrudct = request.object;
+  var productQuery = new Parse.Query('Products');
+  productQuery.get(inproperPrudct.get('product').id).then(function (fetchedProduct) {
+    fetchedProduct.set('inproper', true);
+    fetchedProduct.set('inproperDetail', inproperPrudct);
+    fetchedProduct.save().then(function () {
+      var text =  "您的商品\"" + fetchedProduct.get('title') + "\"已被檢舉，原因為：\"" + inproperPrudct.get('reason') + "\"，如為錯誤的檢舉，確認後會再次幫您自動上架。"
+      sendPushToChannel({'title': 'beeding', 'msg': text}, "beeding-"+fetchedProduct.get('seller').id);
+    })
+  });
+});
+
+var sendPushToChannel = function (data, channel) {
+  Parse.Cloud.httpRequest({
+    url: pushd.domain+"/event/"+channel,
+    method: "POST",
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'accept': 'application/json'
+    },
+    body: data,
+    success: function (httpResponse) {
+      console.log(httpResponse);
+    },
+    error: function (httpResponse) {
+      console.log(httpResponse);
+    }
+  });
+};
+
+Parse.Cloud.beforeSave("Products", function(request, response) {
+  if (request.object.id) {
+    var hashtagsQuery = new Parse.Query('Hashtags');
+    hashtagsQuery.equalTo("product", request.object).find().then(function (hashtags) {
+        Parse.Object.destroyAll(hashtags).then(function () {
+          response.success();
+        });
+      });
+  } else {
+    response.success();
+  }
+});
+
 Parse.Cloud.afterDelete('Products', function (request) {
   var productId = request.object.id;
+
+  // Count how many products a seller has now
+  if (request.user) {
+    var sender = request.user;
+    var productsQuery = new Parse.Query('Products');
+    productsQuery.equalTo('seller', sender).count().then(function (count) {
+      sender.set('numberOfProducts', count);
+      sender.save();
+    })
+  }
+
   var activitesQuery = new Parse.Query('Activites');
   activitesQuery.equalTo('activityObject', request.object).find().then(function (activites) {
     Parse.Object.destroyAll(activites);
@@ -144,6 +358,10 @@ Parse.Cloud.afterDelete('Products', function (request) {
   likesQuery.equalTo('likedProduct', request.object).find().then(function (likes) {
     Parse.Object.destroyAll(likes);
   });
+  var hashtagsQuery = new Parse.Query('Hashtags');
+  hashtagsQuery.equalTo("product", request.object).find().then(function (hashtags) {
+      Parse.Object.destroyAll(hashtags);
+  });
 
   var images = request.object.get('images');
   var deleteImagesReqs = images.map(function (image) {
@@ -158,14 +376,16 @@ Parse.Cloud.afterDelete('Products', function (request) {
   });
   Parse.Promise.when(images);
   var video = request.object.get('video');
-  Parse.Cloud.httpRequest({
-    method: 'DELETE',
-    url: video.url(),
-    headers: {
-      "X-Parse-Application-Id": "DHPbawPXsk9VM697XtD0UNuYAuaxuxc8tEXoIquY",
-      "X-Parse-Master-Key": "gHSj9XICI4DxlHD89WCzWn1ki77foPucPBAqil6p"
-    }
-  });
+  if (video) {
+    Parse.Cloud.httpRequest({
+      method: 'DELETE',
+      url: video.url(),
+      headers: {
+        "X-Parse-Application-Id": "DHPbawPXsk9VM697XtD0UNuYAuaxuxc8tEXoIquY",
+        "X-Parse-Master-Key": "gHSj9XICI4DxlHD89WCzWn1ki77foPucPBAqil6p"
+      }
+    });
+  }
   var thumbnailImages = request.object.get('thumbnailImages');
   var deleteThumbnailImagesReqs = thumbnailImages.map(function (thumbnailImage) {
     return Parse.Cloud.httpRequest({
@@ -181,9 +401,34 @@ Parse.Cloud.afterDelete('Products', function (request) {
   Parse.Promise.when(deleteThumbnailImagesReqs);
 });
 
-Parse.Cloud.afterDelete('Messages', function (request) {
+Parse.Cloud.afterDelete('OrderMessages', function (request) {
   var chatsQuery = new Parse.Query('Chats');
-  chatsQuery.equalTo('chatRoomId', request.object.chatRoomId);
+  chatsQuery.equalTo('chatRoomId', request.object.chatRoomId).find().then(function (chats) {
+    Parse.Object.destroyAll(chats);
+  })
+});
+
+Parse.Cloud.define('createHashtags', function (request, response) {
+  var hashtags = request.params.hashtags;
+  var productId = request.params.productId;
+  console.log("hashtags: " + hashtags + "productId: " + productId);
+  var Hashtags = Parse.Object.extend("Hashtags");
+  var productsQuery = new Parse.Query('Products');
+  productsQuery.get(productId).then(function (product) {
+    var promiseReqs = hashtags.map(function (hashtag) {
+      var ht = new Hashtags();
+      ht.set('hashtag', hashtag);
+      ht.set('product', product);
+      return ht.save();
+    });
+    Parse.Promise.when(promiseReqs).then(function () {
+      response.success('ok');
+    }, function (error) {
+      response.error('error');
+    });
+  }, function (error) {
+    response.error('error');
+  });
 });
 
 Parse.Cloud.define('findFriendByPhones', function (request, response) {
@@ -198,10 +443,14 @@ Parse.Cloud.define('findFriendByPhones', function (request, response) {
     users = users.filter(function (user) {
       return user && user.id !== request.user.id;
     });
-    request.user.relation('friendsRelation').add(users);
-    request.user.save().then(function () {
-      response.success('ok');
-    });
+    if (users.length > 0) {
+      request.user.relation('friendsRelation').add(users);
+      request.user.save().then(function () {
+        response.success('ok');
+      });
+    } else {
+      response.success('no friends');
+    }
   });
 });
 
@@ -213,8 +462,8 @@ Parse.Cloud.define('getProductById', function (request, response) {
   productContainer.liked = false;
   productsQuery.include('seller');
   productsQuery.get(request.params.productId).then(function (product) {
-    var commentsPromise = commentsQuery.equalTo('product', product).include('commenter').descending('createdAt').find()
-    var likesPromise = likesQuery.equalTo('likedProduct', product).include('likedUser').find()
+    var commentsPromise = commentsQuery.equalTo('product', product).include('commenter').descending('createdAt').find();
+    var likesPromise = likesQuery.equalTo('likedProduct', product).include('likedUser').find();
     productContainer.product = product;
     return Parse.Promise.when([commentsPromise, likesPromise])
   }).then(function (comments, likes) {
@@ -237,6 +486,88 @@ Parse.Cloud.define('getProductsByUser', function (request, response) {
   productsQuery.equalTo('seller', user);
   productsQuery.find().then(function (products) {
     response.success(products);
+  })
+});
+
+Parse.Cloud.define('getSellersOtherProductContainers', function (request, response) {
+  var productsQuery = new Parse.Query('Products');
+  productsQuery.get(request.params.productId).then(function (product) {
+    productsQuery
+      .include('seller')
+      .equalTo('seller', product.get('seller'))
+      .notEqualTo('inproper', true)
+      .notEqualTo('objectId', request.params.productId).find().then(function (products) {
+        var likes = null;
+        var comments = null;
+        var likeQueries = products.map(function (product) {
+          var likesQuery = new Parse.Query('Likes');
+          likesQuery.equalTo('likedProduct', product).include('likedUser');
+          return likesQuery.find();
+        });
+        var commentQueries = products.map(function (product) {
+          var commentsQuery = new Parse.Query('Comments');
+          commentsQuery.equalTo('product', product).include('commenter').descending('createdAt');
+          return commentsQuery.find();
+        });
+        Parse.Promise.when(likeQueries).then(function () {
+          likes = [].slice.call(arguments);
+          return Parse.Promise.when(commentQueries);
+        }).then(function () {
+          comments = [].slice.call(arguments);
+          var result = products.map(function (product, index) {
+            var liked = false;
+            if (request.user && request.user.id) {
+              likes[index].forEach(function (like) {
+                if((like.get('likedUser') && like.get('likedUser').id) === request.user.id) liked = true;
+              })
+            }
+            return {
+              product: product,
+              comments: comments[index],
+              likes: likes[index],
+              liked: liked
+            }
+          });
+          response.success(result);
+        });
+      });
+  });
+});
+
+Parse.Cloud.define('getProductsByTag', function (request, response) {
+  var tag = request.params.tag;
+  // get tags by equalTo tag
+  var hashtagsQuery = new Parse.Query('Hashtags');
+  hashtagsQuery.equalTo('hashtag', tag).find().then(function (hashtagObjs) {
+      var commentsQuery = new Parse.Query('Comments');
+      var likesQuery = new Parse.Query('Likes');
+      var productContainerQueries = hashtagObjs.map(function (hashtagObj) {
+        var productContainer = {};
+        productContainer.liked = false;
+        productContainer.tag = tag;
+        var productsQuery = new Parse.Query('Products');
+        return productsQuery.include('seller').get(hashtagObj.get('product').id).then(function (product) {
+            var commentsPromise = commentsQuery.equalTo('product', product).include('commenter').descending('createdAt').find();
+            var likesPromise = likesQuery.equalTo('likedProduct', product).include('likedUser').find();
+            productContainer.product = product;
+            return Parse.Promise.when([commentsPromise, likesPromise])
+        }).then(function (comments, likes) {
+          productContainer.comments = comments;
+          productContainer.likes = likes;
+          if (request.user && request.user.id) {
+            likes.forEach(function (like) {
+              if(like.get('likedUser').id === request.user.id) productContainer.liked = true;
+            })
+          }
+          return productContainer;
+        })
+      })
+      Parse.Promise.when(productContainerQueries).then(function () {
+        var productContainers = [].slice.call(arguments);
+        response.success(productContainers);
+      })
+  }, function (error) {
+    response.error(error);
   })
 });
 
@@ -271,10 +602,9 @@ Parse.Cloud.define('unlikeProducts', function (request, response) {
   })
 });
 
-
 Parse.Cloud.define('productWithRelated', function (request, response) {
   var skip = request.params.skip || 0;
-  var limit = request.params.limit || 10;
+  var limit = request.params.limit || 24;
   var selectedCategory = request.params.selectedCategory;
   console.log('selectedCategory: ' + selectedCategory);
   var productsQuery = new Parse.Query('Products');
@@ -347,18 +677,28 @@ Parse.Cloud.define('friendWithRelated', function (request, response) {
         return productQuery.find();
       });
       Parse.Promise.when(productQueries).then(function () {
-        var friendProducts = [].slice.call(arguments);
-        friends.forEach(function (friend, index) {
-          if(friendProducts[index].length !== 0) {
-            allFriends.push(friend);
-            allFriendsProducts.push(friendProducts[index]);
-          }
-        })
-        var friendsFriendQueryPromise = friends.map(function (friend) {
-          var friendRelationQuery = friend.relation('friendsRelation').query();
-          return friendRelationQuery.find();
-        });
-        return Parse.Promise.when(friendsFriendQueryPromise)
+        if (friends.length > 0) {
+          var friendProducts = [].slice.call(arguments);
+          friends.forEach(function (friend, index) {
+            console.log("friendProducts[index].length: " + friendProducts[index].length);
+            if(friendProducts[index].length !== 0) {
+              allFriends.push(friend);
+              allFriendsProducts.push(friendProducts[index]);
+            }
+          })
+          var friendsFriendQueryPromise = friends.map(function (friend) {
+            var friendRelationQuery = friend.relation('friendsRelation').query();
+            return friendRelationQuery.find();
+          });
+          return Parse.Promise.when(friendsFriendQueryPromise)
+        } else {
+          response.success({
+            allFriends: [],
+            friendsProducts: [],
+            allFriendsFriends: [],
+            allFriendsFriendsProduct: [],
+          });
+        }
       }).then(function () {
           var friendsFriendsList = [].slice.call(arguments);
           var friendsProductsQueryPromise = [];
@@ -383,12 +723,17 @@ Parse.Cloud.define('friendWithRelated', function (request, response) {
           allFriends: allFriends,
           friendsProducts: allFriendsProducts,
           allFriendsFriends: allFriendsFriends,
-          allFriendsFriendsProduct: allFriendsFriendsProduct
+          allFriendsFriendsProduct: allFriendsFriendsProduct,
         });
       })
     });
   } else {
-    response.success([]);
+    response.success({
+      allFriends: [],
+      friendsProducts: [],
+      allFriendsFriends: [],
+      allFriendsFriendsProduct: [],
+    });
   }
 });
 
