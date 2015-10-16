@@ -318,12 +318,17 @@ var sendPushToChannel = function (data, channel) {
 
 Parse.Cloud.beforeSave("Products", function(request, response) {
   if (request.object.id) {
-    var hashtagsQuery = new Parse.Query('Hashtags');
-    hashtagsQuery.equalTo("product", request.object).find().then(function (hashtags) {
-        Parse.Object.destroyAll(hashtags).then(function () {
-          response.success();
-        });
+    if (request.object.dirty("story")) {
+      console.log("story is dirty");
+      var hashtagsQuery = new Parse.Query('Hashtags');
+      hashtagsQuery.equalTo("product", request.object).find().then(function (hashtags) {
+          Parse.Object.destroyAll(hashtags).then(function () {
+            response.success();
+          });
       });
+    } else {
+      response.success();
+    }
   } else {
     response.success();
   }
@@ -331,6 +336,7 @@ Parse.Cloud.beforeSave("Products", function(request, response) {
 
 Parse.Cloud.afterDelete('Products', function (request) {
   var productId = request.object.id;
+  console.log("afterDelete productId: " + productId);
 
   // Count how many products a seller has now
   if (request.user) {
@@ -411,7 +417,7 @@ Parse.Cloud.afterDelete('OrderMessages', function (request) {
 Parse.Cloud.define('createHashtags', function (request, response) {
   var hashtags = request.params.hashtags;
   var productId = request.params.productId;
-  console.log("hashtags: " + hashtags + "productId: " + productId);
+  console.log("hashtags: " + hashtags + ", productId: " + productId);
   var Hashtags = Parse.Object.extend("Hashtags");
   var productsQuery = new Parse.Query('Products');
   productsQuery.get(productId).then(function (product) {
@@ -422,7 +428,7 @@ Parse.Cloud.define('createHashtags', function (request, response) {
       return ht.save();
     });
     Parse.Promise.when(promiseReqs).then(function () {
-      response.success('ok');
+      response.success('createHashtags ok');
     }, function (error) {
       response.error('error');
     });
@@ -570,15 +576,15 @@ Parse.Cloud.define('getProductContainersByUser', function (request, response) {
   });
 });
 
-Parse.Cloud.define('getSellersOtherProductContainers', function (request, response) {
-  var productId = request.params.productId;
-  var singleProductQuery = new Parse.Query('Products');
-  singleProductQuery.get(productId).then(function (aProduct) {
+Parse.Cloud.define('getSellingProductContainers', function (request, response) {
+  var sellerId = request.params.sellerId;
+  var userQuery = new Parse.Query(Parse.User);
+  userQuery.get(sellerId).then(function (user) {
     var productsQuery = new Parse.Query('Products');
     productsQuery
       .include('seller')
-      .equalTo('seller', aProduct.get('seller'))
-      .notEqualTo('inproper', true).notEqualTo('objectId', aProduct.id).find().then(function (products) {
+      .equalTo('seller', user)
+      .notEqualTo('inproper', true).find().then(function (products) {
         var likes = null;
         var comments = null;
         var likeQueries = products.map(function (product) {
@@ -646,7 +652,10 @@ Parse.Cloud.define('getProductsByTag', function (request, response) {
       })
       Parse.Promise.when(productContainerQueries).then(function () {
         var productContainers = [].slice.call(arguments);
-        response.success(productContainers);
+        var properContainers = productContainers.filter(function (container) {
+          return container.product.get('inproper') != true;
+        });
+        response.success(properContainers);
       })
   }, function (error) {
     response.error(error);
